@@ -7,55 +7,57 @@ const rp = require('request-promise'),
   nodemailer = require('nodemailer'),
   passwords = require('./passwords');
 
-const WEBSITE_TO_SCRAPE_URL = 'https://www.healthcaresource.com/steward/index.cfm?&iregionid=1&template=dsp_job_list%2Ecfm&ifacilityid=910098025&cjoborderby=&ijobpostondaysold=&ijobcatid=105&cjobattr2=All&cjobattr1=All&ijobrowstart=1&ckeywordsearchcategory=cdept%2C%20mdes%2C%20creqnum&ilocationid=%24all&nkeywordsearch=&fuseaction=search%2EjobList';
-const FIREBASE_FIELD = 'mostRecentJobId';
+const WEBSITE_TO_SCRAPE_URL = 'https://www.healthcaresource.com/steward/index.cfm?&template=dsp_job_list%2Ecfm&fuseaction=search%2EjobList&ilocationid=%24all&cjoborderby=&cjobattr1=All&ifacilityid=910098025&ckeywordsearchcategory=cdept%2C%20mdes%2C%20creqnum&ijobcatid=105&cjobattr2=All&iregionid=%24all&ijobrowstart=1&ijobpostondaysold=7&nkeywordsearch=';
+const FIREBASE_FIELD = 'nurseJobIds';
 
 admin.initializeApp({
   credential: admin.credential.cert(firebaseServiceAccount),
   databaseURL: passwords.database
 });
-const database =  admin.database();
+const database = admin.database();
 
 const port = process.env.PORT || 8080;
 console.log(`Express listening... on ${port}`);
 app.listen(port);
-app.get("/", routeRequest);
+app.get("/nursing-job-alert", routeRequest);
 
 async function routeRequest (req, res, next) {
   res.setHeader('Content-Type', 'application/json');
   try{
     res.send(JSON.stringify({ status: 'OK', response: await nurseAlert() }));
   } catch (error) {
-    res.send(JSON.stringify({ status: 500, response: error }));
+    console.log(error);
+    res.status(500).send({error: error});
   }
 }
 
 async function nurseAlert () {
   try {
+    console.log('Scraping site...');
     var options = {uri: WEBSITE_TO_SCRAPE_URL, transform: body => cheerio.load(body)};
     const $ = await rp(options);
 
-    const firstRow = $('tbody').eq(1).find('tr').eq(0);
-    const firstJob = firstRow.children('td.center').toArray().map((el) => {
-      return $(el).text().trim();
+    const jobs = [];
+    $('tbody > tr').slice(1).each((index, el) => {
+      const job = $(el).text().replace(/\s/g,'').split('-');
+      job[2] = job[2].substr(0, 2);
+      jobs.push(job.slice(0, 3).join('-').split('.')[1].toLowerCase());
     });
 
-    const newJobId = firstJob.join('-').toLowerCase();
-    if (!newJobId) {
-      throw new Error('No ID found');
-    }
-    return checkCurrentFirstJob(newJobId);
+    return checkStoredJobs(jobs);
   } catch (error) {
     console.error(error);
     throw new Error(error);
   }
 }
 
-async function checkCurrentFirstJob (newJobId) {
+async function checkStoredJobs (newJobs) {
   try {
     const firebaseData = await readDataFromFirebase(`/${FIREBASE_FIELD}`);
-    if (newJobId && newJobId !== firebaseData.val()) {
-      await writeDataToFirebase('/', {[FIREBASE_FIELD]: newJobId});
+    const storedJobs = firebaseData.val();
+    if (newJobs.some(job => !storedJobs || !storedJobs.includes(job))) {
+      console.log('NEWJOB');
+      await writeDataToFirebase('/', {[FIREBASE_FIELD]: newJobs});
       return sendEmail();
     }
     return 'OLD JOB';
@@ -85,11 +87,10 @@ function sendEmail () {
 
     const mailOptions = {
       from: passwords.fromEmail,
-      to: passwords.recipientEmail, 
+      to: passwords.recipientEmail,
       subject: 'Nurse Job Alert',
       html: passwords.message.replace('${url}', WEBSITE_TO_SCRAPE_URL)
     };
-
     return transporter.sendMail(mailOptions);
   } catch (error) {
     console.error(error);
